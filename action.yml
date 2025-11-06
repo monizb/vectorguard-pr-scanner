@@ -1,0 +1,63 @@
+name: Security PR Reviewer
+description: Security-focused PR reviewer with data-flow highlights powered by Gemini.
+author: VectorGuard
+branding:
+  icon: shield
+  color: blue
+runs:
+  using: node20
+  main: dist/index.js
+inputs:
+  gemini_api_key:
+    description: Google Gemini API key (or set env GEMINI_API_KEY)
+    required: true
+  model:
+    description: Gemini model name
+    required: false
+    default: gemini-1.5-pro-latest
+  temperature:
+    description: Sampling temperature
+    required: false
+    default: '0.2'
+  max_output_tokens:
+    description: Max output tokens from Gemini
+    required: false
+    default: '4096'
+  enable_inline:
+    description: Emit inline review suggestions JSON via output
+    required: false
+    default: 'false'
+  personality:
+    description: Reviewer tone/persona for LLM prompt
+    required: false
+    default: mentor, concise, slightly witty
+  update_existing:
+    description: Update existing bot comment instead of creating a new one
+    required: false
+    default: 'true'
+  fail_on_high:
+    description: Fail the job if High or Critical risk findings are detected
+    required: false
+    default: 'false'
+  repo:
+    description: Optional repo in owner/name for manual invocation
+    required: false
+  owner:
+    description: Optional owner; overrides repo owner
+    required: false
+  pr_number:
+    description: Optional pull request number for manual invocation
+    required: false
+outputs:
+  comment_id:
+    description: The GitHub comment id that was created/updated.
+  risk:
+    description: Overall risk level (None|Low|Medium|High|Critical).
+  inline:
+    description: JSON array string of suggested inline comments.
+  summary_url:
+    description: URL of the summary comment.
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
