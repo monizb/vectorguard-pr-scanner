@@ -6,7 +6,7 @@ import { analyzeJavaScript } from './analyzers/javascript';
 import { buildUnified } from './diffs';
 import { buildSystemPrompt, buildUserPrompt } from './prompt';
 import { formatDataflowList, renderComment } from './comment';
-import { Confidence, DataFlowItem, InlineHint, PRContext, RiskLevel } from './types';
+import { Confidence, DataFlowItem, InlineHint, PRContext, RiskLevel, DiffFile } from './types';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { combineConfidence, detectSecrets, estimateEffort, maxRisk } from './analyzers/common';
 
@@ -74,6 +74,9 @@ async function run() {
       const text = result.response.text();
       // Simple key extraction using tags we requested
       const sections = parseSections(text);
+      // If strict tag-based parsing failed to populate, try markdown-based extraction
+      const mdFallback = ensureSectionsWithMarkdown(text, sections);
+      Object.assign(sections, mdFallback);
       walkthrough = sections.WALKTHROUGH || '';
       changesTableRows = sections.CHANGES_TABLE_ROWS || '';
       mermaidSequence = sections.MERMAID_SEQUENCE || '';
@@ -90,6 +93,17 @@ async function run() {
       core.warning(`Gemini generation failed: ${(err as Error).message}`);
       walkthrough = 'Automated analysis fallback due to LLM unavailability.';
       findingsList = secrets.length ? `\n- Secrets detected: ${secrets.join(', ')}` : '';
+    }
+
+    // Deterministic fallbacks if model output was empty or weak
+    if (!changesTableRows.trim()) {
+      changesTableRows = buildChangesTableRows(files);
+    }
+    if (!walkthrough.trim()) {
+      walkthrough = buildWalkthroughSummary(unified.stats, files);
+    }
+    if (!focusList.trim()) {
+      focusList = buildFocusList(files);
     }
 
     const dataflowList = formatDataflowList(flows);
@@ -151,6 +165,113 @@ function parseSections(text: string): Record<string, string> {
     if (m) out[k] = m[1].trim();
   }
   return out;
+}
+
+// Try to extract sections from common markdown that LLMs often produce
+function ensureSectionsWithMarkdown(text: string, current: Record<string, string>): Partial<Record<string, string>> {
+  const out: Partial<Record<string, string>> = {};
+  const md = text || '';
+  const grab = (header: string): string => {
+    const re = new RegExp(`^##\\s+${header}\\s*\n([\\s\\S]*?)(?=\n##\\s+|$)`, 'mi');
+    const m = md.match(re);
+    return m ? m[1].trim() : '';
+  };
+  if (!current.WALKTHROUGH) out.WALKTHROUGH = grab('Walkthrough');
+  if (!current.CHANGES_TABLE_ROWS) {
+    const changes = grab('Changes');
+    // Extract only table rows by removing header if present
+    const rows = changes
+      .split(/\n/)
+      .filter((ln) => ln.trim().startsWith('|') && !/\|\s*-{3,}\s*\|/.test(ln))
+      .join('\n')
+      .trim();
+    if (rows) out.CHANGES_TABLE_ROWS = rows;
+  }
+  if (!current.MERMAID_SEQUENCE) {
+    const mermaid = /```mermaid\n([\s\S]*?)```/im.exec(md);
+    if (mermaid) out.MERMAID_SEQUENCE = mermaid[1].trim();
+  }
+  if (!current.POSITIVE_NOTES) out.POSITIVE_NOTES = grab('Positive notes');
+  if (!current.FINDINGS_LIST) out.FINDINGS_LIST = grab('Key findings');
+  if (!current.FOCUS_LIST) {
+    const focusBlock = /\*\s*Focus review on:\s*\n([\s\S]*?)(?=\n\n|\n##\s+|$)/im.exec(md);
+    if (focusBlock) out.FOCUS_LIST = focusBlock[1].trim();
+  }
+  if (!current.RELATED_PRS) out.RELATED_PRS = grab('Possibly related PRs') || grab('Possibly related PRs') || grab('Possibly related PRs');
+  if (!current.SUGGESTED_LABELS) out.SUGGESTED_LABELS = grab('Suggested labels');
+  if (!current.POEM) out.POEM = grab('Poem');
+  return out;
+}
+
+function buildChangesTableRows(files: DiffFile[]): string {
+  if (!files.length) return '| — | No material changes |';
+  const cohorts: { cohort: string; file: string; summary: string }[] = files.slice(0, 50).map((f) => ({
+    cohort: cohortFor(f.filename),
+    file: f.filename,
+    summary: `${statusEmoji(f.status)} ${humanStatus(f.status)} (+${f.additions}/-${f.deletions})`,
+  }));
+  return cohorts
+    .map((c) => `| **${c.cohort}** <br> \`${c.file}\` | ${c.summary} |`)
+    .join('\n');
+}
+
+function buildWalkthroughSummary(stats: { filesChanged: number; additions: number; deletions: number }, files: DiffFile[]): string {
+  if (!files.length) return 'No material changes.';
+  const top = files
+    .slice()
+    .sort((a, b) => b.changes - a.changes)
+    .slice(0, 5)
+    .map((f) => `\`${f.filename}\` (${humanStatus(f.status)}, +${f.additions}/-${f.deletions})`)
+    .join(', ');
+  return `Updates ${stats.filesChanged} files (+${stats.additions}/-${stats.deletions}). Notable: ${top}.`;
+}
+
+function buildFocusList(files: DiffFile[]): string {
+  const list: string[] = [];
+  if (files.some((f) => /package\.json|lock/.test(f.filename))) list.push('- Dependency changes: verify versions and license impacts.');
+  if (files.some((f) => /\.(tsx?|jsx?)$/.test(f.filename))) list.push('- JS/TS changes: validate input validation and escape paths.');
+  if (files.some((f) => /\.(ya?ml)$/.test(f.filename))) list.push('- CI/config changes: ensure least-privilege and safe defaults.');
+  if (!list.length) list.push('- Review any auth or input validation boundaries.');
+  return list.join('\n');
+}
+
+function statusEmoji(status: string): string {
+  switch (status) {
+    case 'added':
+      return '🆕';
+    case 'modified':
+      return '✏️';
+    case 'removed':
+      return '🗑️';
+    case 'renamed':
+      return '🔁';
+    default:
+      return '▫️';
+  }
+}
+
+function humanStatus(status: string): string {
+  switch (status) {
+    case 'added':
+      return 'Added';
+    case 'modified':
+      return 'Modified';
+    case 'removed':
+      return 'Removed';
+    case 'renamed':
+      return 'Renamed';
+    default:
+      return status;
+  }
+}
+
+function cohortFor(filename: string): string {
+  if (/^src\//.test(filename)) return 'Source';
+  if (/^tests?\//.test(filename)) return 'Tests';
+  if (/^app\//.test(filename)) return 'App';
+  if (/^config|\.ya?ml$/.test(filename)) return 'Config';
+  if (/package\.json|tsconfig\.json/.test(filename)) return 'Build';
+  return 'General';
 }
 
 async function setOutput(name: string, value: string) {

@@ -39,9 +39,12 @@ export async function buildUnified(octokit: Octokit, ctx: PRContext, files: Diff
     additions += f.additions;
     deletions += f.deletions;
     if (f.patch) unifiedDiff += `\n# File: ${f.filename}\n${f.patch}\n`;
-    // language detection
-    const ext = f.filename.slice(f.filename.lastIndexOf('.'));
-    if (EXT_LANG[ext]) languagesSet.add(EXT_LANG[ext]);
+    // language detection (safe for no-extension paths)
+    const dotIdx = f.filename.lastIndexOf('.');
+    if (dotIdx >= 0) {
+      const ext = f.filename.slice(dotIdx);
+      if (EXT_LANG[ext]) languagesSet.add(EXT_LANG[ext]);
+    }
     // fetch content head
     const content = await getFileContentAtRef(octokit, ctx, f.filename, ctx.headSha);
     if (content) {
