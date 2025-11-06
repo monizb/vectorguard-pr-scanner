@@ -69,6 +69,7 @@ async function run() {
     let suggestedLabels = '';
     let poem = '';
     let inline: InlineHint[] = [];
+    let aiUsed = false;
     try {
       const result = await model.generateContent(prompt);
       const text = result.response.text();
@@ -86,6 +87,7 @@ async function run() {
       relatedPrs = sections.RELATED_PRS || '';
       suggestedLabels = sections.SUGGESTED_LABELS || '';
       poem = sections.POEM || '';
+      aiUsed = Boolean(walkthrough || changesTableRows || findingsList || mermaidSequence);
       if (enableInline && sections.INLINE_JSON) {
         inline = JSON.parse(sections.INLINE_JSON);
       }
@@ -101,6 +103,9 @@ async function run() {
     }
     if (!walkthrough.trim()) {
       walkthrough = buildWalkthroughSummary(unified.stats, files);
+    }
+    if (!mermaidSequence.trim()) {
+      mermaidSequence = buildDefaultSequence(files);
     }
     if (!focusList.trim()) {
       focusList = buildFocusList(files);
@@ -123,8 +128,8 @@ async function run() {
       suggestedLabels,
       poem,
       checksPassed: 2,
-      descCheckExpl: prCtx.body ? 'Description present.' : 'No description; still passed with minimal info.',
-      titleCheckExpl: prCtx.title ? 'Title is set.' : 'Title missing? Please set a clear title.',
+      descCheckExpl: (prCtx.body ? 'Description present.' : 'No description; still passed with minimal info.') + `  (LLM: ${aiUsed ? 'used' : 'fallback'})`,
+      titleCheckExpl: (prCtx.title ? 'Title is set.' : 'Title missing? Please set a clear title.') + `  (Model: ${modelName})`,
       testBranch: `tests/${prCtx.headRef}`,
     });
 
@@ -272,6 +277,29 @@ function cohortFor(filename: string): string {
   if (/^config|\.ya?ml$/.test(filename)) return 'Config';
   if (/package\.json|tsconfig\.json/.test(filename)) return 'Build';
   return 'General';
+}
+
+function buildDefaultSequence(files: DiffFile[]): string {
+  // Show a simple pipeline; augment with key cohorts if present
+  const hasConfig = files.some((f) => /\.github\/workflows\//.test(f.filename));
+  const hasSource = files.some((f) => /^src\//.test(f.filename));
+  const hasTests = files.some((f) => /^tests?\//.test(f.filename));
+  const lines = [
+    'sequenceDiagram',
+    '    participant PR as Pull Request',
+    '    participant GH as GitHub Actions',
+    '    participant Reviewer as VectorGuard',
+  ];
+  if (hasSource) lines.push('    participant Code as Source');
+  if (hasTests) lines.push('    participant Tests');
+  if (hasConfig) lines.push('    participant CI as Workflow Config');
+  lines.push('    PR->>GH: Event (opened/sync)');
+  if (hasConfig) lines.push('    GH->>CI: Load workflow');
+  lines.push('    GH->>Reviewer: Run security scan');
+  if (hasSource) lines.push('    Reviewer->>Code: Analyze diff hunks');
+  if (hasTests) lines.push('    Reviewer->>Tests: Consider coverage');
+  lines.push('    Reviewer-->>PR: Summary comment');
+  return lines.join('\n');
 }
 
 async function setOutput(name: string, value: string) {
