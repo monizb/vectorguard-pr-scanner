@@ -1,7 +1,7 @@
 import * as core from '@actions/core';
 import * as github from '@actions/github';
 import { Octokit } from '@octokit/rest';
-import { CommentPostResult, DiffFile, PRContext } from './types';
+import { CommentPostResult, DiffFile, PRContext, InlineHint } from './types';
 
 const BOT_MARKER = '<!-- This is an auto-generated comment: summarize by coderabbit.ai -->';
 
@@ -84,3 +84,74 @@ export async function postOrUpdateComment(
 }
 
 export { BOT_MARKER };
+
+// Parse changed head-side line numbers from a unified patch string
+function headChangedLinesFromPatch(patch?: string): Set<number> {
+  const set = new Set<number>();
+  if (!patch) return set;
+  const lines = patch.split(/\r?\n/);
+  let headLine = 0;
+  for (const ln of lines) {
+    const hunk = /^@@\s+-\d+,?\d*\s+\+(\d+),?(\d*)\s+@@/.exec(ln);
+    if (hunk) {
+      headLine = parseInt(hunk[1], 10);
+      continue;
+    }
+    if (ln.startsWith('+') && !ln.startsWith('+++')) {
+      set.add(headLine);
+      headLine += 1;
+    } else if (ln.startsWith('-') && !ln.startsWith('---')) {
+      // deletion; does not advance head
+      continue;
+    } else {
+      // context
+      headLine += 1;
+    }
+  }
+  return set;
+}
+
+export function collectHeadChangedLines(files: DiffFile[]): Map<string, Set<number>> {
+  const map = new Map<string, Set<number>>();
+  for (const f of files) {
+    map.set(f.filename, headChangedLinesFromPatch(f.patch));
+  }
+  return map;
+}
+
+export async function postInlineReviewComments(
+  octokit: Octokit,
+  ctx: PRContext,
+  comments: InlineHint[],
+  options?: { files?: DiffFile[]; body?: string }
+): Promise<void> {
+  if (!comments.length) return;
+  const files = options?.files || [];
+  const changed = collectHeadChangedLines(files);
+
+  // Filter to comments that point to changed lines; fallback: keep if no patch info
+  const eligible = comments.filter((c) => {
+    const set = changed.get(c.path);
+    if (!set || set.size === 0) return true;
+    return set.has(c.line);
+  });
+
+  if (!eligible.length) return;
+
+  // Prepare review with multiple comments
+  const reviewComments = eligible.slice(0, 50).map((c) => ({
+    path: c.path,
+    body: `${BOT_MARKER}\n\n${c.body}`,
+    line: c.line,
+    side: 'RIGHT' as const,
+  }));
+
+  await octokit.pulls.createReview({
+    owner: ctx.owner,
+    repo: ctx.repo,
+    pull_number: ctx.pull_number,
+    event: 'COMMENT',
+    body: options?.body,
+    comments: reviewComments,
+  });
+}

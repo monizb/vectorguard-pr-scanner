@@ -1,7 +1,7 @@
 import * as core from '@actions/core';
 import * as github from '@actions/github';
 import * as fs from 'node:fs';
-import { getOctokit, fetchPRContext, listPRFiles, postOrUpdateComment } from './github';
+import { getOctokit, fetchPRContext, listPRFiles, postOrUpdateComment, postInlineReviewComments } from './github';
 import { analyzeJavaScript } from './analyzers/javascript';
 import { buildUnified } from './diffs';
 import { buildSystemPrompt, buildUserPrompt } from './prompt';
@@ -138,6 +138,15 @@ async function run() {
     await setOutput('risk', risk);
     await setOutput('inline', JSON.stringify(enableInline ? inline : []));
     await setOutput('summary_url', url);
+
+    // Post inline review comments if enabled and produced by model
+    if (enableInline && inline.length) {
+      try {
+        await postInlineReviewComments(octokit, prCtx, inline, { files });
+      } catch (e) {
+        core.warning(`Failed posting inline comments: ${(e as Error).message}`);
+      }
+    }
 
     if (failOnHigh && (risk === 'High' || risk === 'Critical')) {
       core.setFailed(`Risk level is ${risk}`);
